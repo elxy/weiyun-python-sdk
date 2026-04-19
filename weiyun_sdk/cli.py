@@ -5,9 +5,13 @@ import os
 import sys
 import time
 from datetime import datetime
+from typing import Any, Dict
 
 from weiyun_sdk.client import WeiyunClient
 from weiyun_sdk.upload import get_sha1_backend_name
+
+
+_UPLOAD_PROGRESS_STATE: Dict[str, Any] = {"active": False}
 
 
 def _format_bytes(num_bytes: float) -> str:
@@ -38,34 +42,54 @@ def _print_upload_progress(event):
     uploaded_bytes = min(event.get("uploaded_bytes", 0), file_size)
 
     if name == "hashing":
+        _UPLOAD_PROGRESS_STATE["active"] = True
         backend = event.get("sha1_backend", "unknown")
-        print(f"Hashing {filename} with {backend}...", file=sys.stderr)
+        print(f"\rHashing {filename} with {backend}...", end="", file=sys.stderr, flush=True)
         return
 
     if name == "hashed":
-        print("Hash complete, starting upload...", file=sys.stderr)
+        print("\rHash complete, starting upload...", end="", file=sys.stderr, flush=True)
         return
 
     if name == "uploading":
         offset = event.get("offset", 0)
         chunk_size = event.get("chunk_size", 0)
         progress = (offset / file_size * 100) if file_size else 100.0
+        elapsed = event.get("elapsed_seconds", 0.0)
+        speed = uploaded_bytes / elapsed if elapsed > 0 else 0.0
         print(
-            f"Uploading: {progress:6.2f}%  offset={_format_bytes(offset)}  chunk={_format_bytes(chunk_size)}",
+            "\r"
+            f"Uploading: {progress:6.2f}%  sent={_format_bytes(uploaded_bytes)}/{_format_bytes(file_size)}"
+            f"  chunk={_format_bytes(chunk_size)}  speed={_format_bytes(speed)}/s",
+            end="",
             file=sys.stderr,
+            flush=True,
         )
         return
 
     if name == "uploaded":
         progress = (uploaded_bytes / file_size * 100) if file_size else 100.0
+        elapsed = event.get("elapsed_seconds", 0.0)
+        speed = uploaded_bytes / elapsed if elapsed > 0 else 0.0
         print(
-            f"Uploaded:  {progress:6.2f}%  sent={_format_bytes(uploaded_bytes)}/{_format_bytes(file_size)}",
+            "\r"
+            f"Uploaded:  {progress:6.2f}%  sent={_format_bytes(uploaded_bytes)}/{_format_bytes(file_size)}"
+            f"  speed={_format_bytes(speed)}/s",
+            end="",
             file=sys.stderr,
+            flush=True,
         )
         return
 
     if name == "completed" and event.get("fast_upload"):
-        print("Fast upload hit, no chunk transfer needed.", file=sys.stderr)
+        print("\rFast upload hit, no chunk transfer needed.", file=sys.stderr, flush=True)
+        _UPLOAD_PROGRESS_STATE["active"] = False
+
+
+def _finish_upload_progress() -> None:
+    if _UPLOAD_PROGRESS_STATE.get("active"):
+        print(file=sys.stderr, flush=True)
+        _UPLOAD_PROGRESS_STATE["active"] = False
 
 
 def format_size(n: int) -> str:
@@ -407,6 +431,7 @@ Examples:
                 max_rounds=args.max_rounds,
                 progress_callback=_print_upload_progress,
             )
+            _finish_upload_progress()
             elapsed_seconds = res.get("elapsed_seconds", time.perf_counter() - cli_upload_started_at)
             average_speed_bytes = res.get("average_speed_bytes", 0.0)
             print("Upload successful!")
@@ -440,6 +465,7 @@ Examples:
             print(json.dumps(res, indent=2, ensure_ascii=False))
 
     except Exception as e:
+        _finish_upload_progress()
         print(f"Error: {e}", file=sys.stderr)
         sys.exit(1)
 
