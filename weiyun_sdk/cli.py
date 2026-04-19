@@ -14,6 +14,25 @@ from weiyun_sdk.upload import get_sha1_backend_name
 _UPLOAD_PROGRESS_STATE: Dict[str, Any] = {"active": False}
 
 
+def _render_upload_status(prefix: str, file_size: int, uploaded_bytes: int,
+                          elapsed_seconds: float, chunk_size: int = 0,
+                          retry_count: int = 0, worker_count: int = 1,
+                          waiting: bool = False) -> str:
+    progress = (uploaded_bytes / file_size * 100) if file_size else 100.0
+    speed = uploaded_bytes / elapsed_seconds if elapsed_seconds > 0 else 0.0
+    chunk_part = f"  chunk={_format_bytes(chunk_size)}" if chunk_size else "  chunk=-"
+    state_part = "  state=waiting" if waiting else ""
+    return (
+        f"{prefix:<10} {progress:6.2f}%"
+        f"  sent={_format_bytes(uploaded_bytes)}/{_format_bytes(file_size)}"
+        f"{chunk_part}"
+        f"  speed={_format_bytes(speed)}/s"
+        f"  retries={retry_count}"
+        f"  workers={worker_count}"
+        f"{state_part}"
+    )
+
+
 def _format_bytes(num_bytes: float) -> str:
     units = ["B", "KiB", "MiB", "GiB", "TiB"]
     value = float(num_bytes)
@@ -52,10 +71,17 @@ def _print_upload_progress(event):
         return
 
     if name == "waiting":
-        retries = event.get("retry_count", 0)
         print(
             "\r"
-            f"Waiting for server to advance other channels... retries={retries}",
+            + _render_upload_status(
+                "Waiting",
+                file_size,
+                uploaded_bytes,
+                event.get("elapsed_seconds", 0.0),
+                retry_count=event.get("retry_count", 0),
+                worker_count=event.get("max_workers", 1),
+                waiting=True,
+            ),
             end="",
             file=sys.stderr,
             flush=True,
@@ -63,15 +89,18 @@ def _print_upload_progress(event):
         return
 
     if name == "uploading":
-        offset = event.get("offset", 0)
         chunk_size = event.get("chunk_size", 0)
-        progress = (offset / file_size * 100) if file_size else 100.0
-        elapsed = event.get("elapsed_seconds", 0.0)
-        speed = uploaded_bytes / elapsed if elapsed > 0 else 0.0
         print(
             "\r"
-            f"Uploading: {progress:6.2f}%  sent={_format_bytes(uploaded_bytes)}/{_format_bytes(file_size)}"
-            f"  chunk={_format_bytes(chunk_size)}  speed={_format_bytes(speed)}/s",
+            + _render_upload_status(
+                "Uploading",
+                file_size,
+                uploaded_bytes,
+                event.get("elapsed_seconds", 0.0),
+                chunk_size=chunk_size,
+                retry_count=event.get("retry_count", 0),
+                worker_count=event.get("max_workers", 1),
+            ),
             end="",
             file=sys.stderr,
             flush=True,
@@ -79,13 +108,17 @@ def _print_upload_progress(event):
         return
 
     if name == "uploaded":
-        progress = (uploaded_bytes / file_size * 100) if file_size else 100.0
-        elapsed = event.get("elapsed_seconds", 0.0)
-        speed = uploaded_bytes / elapsed if elapsed > 0 else 0.0
         print(
             "\r"
-            f"Uploaded:  {progress:6.2f}%  sent={_format_bytes(uploaded_bytes)}/{_format_bytes(file_size)}"
-            f"  speed={_format_bytes(speed)}/s",
+            + _render_upload_status(
+                "Uploaded",
+                file_size,
+                uploaded_bytes,
+                event.get("elapsed_seconds", 0.0),
+                chunk_size=event.get("chunk_size", 0),
+                retry_count=event.get("retry_count", 0),
+                worker_count=event.get("max_workers", 1),
+            ),
             end="",
             file=sys.stderr,
             flush=True,
