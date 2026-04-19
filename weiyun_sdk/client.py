@@ -225,8 +225,8 @@ class WeiyunClient:
             state = int(up_rsp.get("upload_state", 0))
             if state == 2:
                 return {
-                    "file_id": up_rsp.get("file_id", ""),
-                    "filename": up_rsp.get("filename", filename)
+                    "file_id": up_rsp.get("file_id") or pre_rsp.get("file_id", ""),
+                    "filename": up_rsp.get("filename") or pre_rsp.get("filename", filename)
                 }
                 
         raise RuntimeError(f"Exceeded maximum upload rounds ({max_rounds})")

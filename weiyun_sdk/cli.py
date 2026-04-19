@@ -72,7 +72,7 @@ def resolve_path_to_dir(client: WeiyunClient, path: str):
             res = client.list(get_type=1, offset=offset, limit=limit,
                               dir_key=current_dir_key, pdir_key=current_pdir_key)
 
-            if 'error' in res:
+            if res.get('error'):
                 raise RuntimeError(f"Error listing directory: {res['error']}")
 
             if next_level_pdir_key is None:
@@ -141,7 +141,7 @@ def resolve_entry(client: WeiyunClient, id_or_key: str, pdir_key: str = None):
             res = client.list(get_type=0, offset=offset, limit=limit,
                               dir_key=parent_dir_key, pdir_key=parent_pdir_key)
 
-            if 'error' in res:
+            if res.get('error'):
                 raise RuntimeError(f"Error listing directory: {res['error']}")
 
             if list_pdir_key is None:
@@ -174,7 +174,7 @@ def resolve_entry(client: WeiyunClient, id_or_key: str, pdir_key: str = None):
             # pdir_key 即为父目录的 dir_key，用于列举父目录内容
             res = client.list(get_type=0, offset=offset, limit=limit, dir_key=pdir_key)
 
-            if 'error' in res:
+            if res.get('error'):
                 raise RuntimeError(f"Error listing directory: {res['error']}")
 
             for d in res.get("dir_list", []):
