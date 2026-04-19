@@ -25,6 +25,7 @@ class WeiyunClient:
         self._request_id = 0
         self._request_id_lock = threading.Lock()
         self._session = requests.Session()
+        self._thread_local = threading.local()
 
     def _next_request_id(self) -> int:
         with self._request_id_lock:
@@ -76,22 +77,29 @@ class WeiyunClient:
     def _mcp_call(self, tool_name: str, arguments: Dict[str, Any]) -> Dict[str, Any]:
         return self._mcp_call_with_session(self._session, tool_name, arguments)
 
+    def _get_worker_session(self) -> requests.Session:
+        session = getattr(self._thread_local, "session", None)
+        if session is None:
+            session = requests.Session()
+            self._thread_local.session = session
+        return session
+
     def _upload_chunk_request(self, filename: str, file_size: int, file_sha: str, check_sha: str,
                               upload_key: str, channel_list: List[Dict[str, int]], channel_id: int,
                               ex: str, chunk: bytes) -> Dict[str, Any]:
-        with requests.Session() as session:
-            return self._mcp_call_with_session(session, "weiyun.upload", {
-                "filename": filename,
-                "file_size": file_size,
-                "file_sha": file_sha,
-                "block_sha_list": [],
-                "check_sha": check_sha,
-                "upload_key": upload_key,
-                "channel_list": channel_list,
-                "channel_id": channel_id,
-                "ex": ex,
-                "file_data": base64.b64encode(chunk).decode("utf-8"),
-            })
+        session = self._get_worker_session()
+        return self._mcp_call_with_session(session, "weiyun.upload", {
+            "filename": filename,
+            "file_size": file_size,
+            "file_sha": file_sha,
+            "block_sha_list": [],
+            "check_sha": check_sha,
+            "upload_key": upload_key,
+            "channel_list": channel_list,
+            "channel_id": channel_id,
+            "ex": ex,
+            "file_data": base64.b64encode(chunk).decode("utf-8"),
+        })
 
     def _collect_available_channels(self, ch_list: List[Dict[str, Any]]) -> List[Dict[str, int]]:
         channels: List[Dict[str, int]] = []
