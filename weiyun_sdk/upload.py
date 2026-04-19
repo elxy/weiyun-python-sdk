@@ -3,6 +3,8 @@ import hashlib
 import os
 import struct
 
+from .openssl_sha1 import OpenSSLSHA1, is_available as openssl_sha1_available
+
 BLOCK_SIZE = 524288  # 512KB
 
 def _left_rotate(n, b):
@@ -25,19 +27,34 @@ class SHA1:
 
     def update(self, data):
         """Append data to the SHA1 object"""
-        self._unprocessed += data
+        if not data:
+            return
+
         self._message_byte_length += len(data)
-        # Process every 64 bytes
-        while len(self._unprocessed) >= 64:
-            self._process_chunk(self._unprocessed[:64])
-            self._unprocessed = self._unprocessed[64:]
+
+        if self._unprocessed:
+            needed = 64 - len(self._unprocessed)
+            if len(data) < needed:
+                self._unprocessed += data
+                return
+
+            chunk = self._unprocessed + data[:needed]
+            self._process_chunk(chunk)
+            self._unprocessed = b""
+            data = data[needed:]
+
+        full_len = len(data) - (len(data) % 64)
+        view = memoryview(data)
+        for offset in range(0, full_len, 64):
+            self._process_chunk(view[offset:offset + 64])
+
+        if full_len < len(data):
+            self._unprocessed = bytes(view[full_len:])
 
     def _process_chunk(self, chunk):
         """Process a 64-byte SHA1 block"""
         assert len(chunk) == 64
-        w = [0] * 80
-        for i in range(16):
-            w[i] = struct.unpack(">I", chunk[i * 4:(i + 1) * 4])[0]
+        w = list(struct.unpack(">16I", chunk)) + [0] * 64
         for i in range(16, 80):
             w[i] = _left_rotate(w[i - 3] ^ w[i - 8] ^ w[i - 14] ^ w[i - 16], 1)
         a, b, c, d, e = self.h0, self.h1, self.h2, self.h3, self.h4
@@ -99,6 +116,12 @@ class SHA1:
             tmp.h0, tmp.h1, tmp.h2, tmp.h3, tmp.h4)
 
 
+def create_sha1():
+    if openssl_sha1_available():
+        return OpenSSLSHA1()
+    return SHA1()
+
+
 def calc_upload_params(file_path):
     """
     Calculate Weiyun upload parameters:
@@ -120,22 +143,28 @@ def calc_upload_params(file_path):
     before_block_size = file_size - last_block_size
     
     block_sha_list = []
-    sha1 = SHA1()
+    sha1 = create_sha1()
     md5 = hashlib.md5()
     
     with open(file_path, "rb") as f:
-        for offset in range(0, before_block_size, BLOCK_SIZE):
+        while f.tell() < before_block_size:
             data = f.read(BLOCK_SIZE)
+            if not data:
+                raise IOError(f"Unexpected EOF while hashing {file_path}")
             sha1.update(data)
             md5.update(data)
             block_sha_list.append(sha1.get_state())
             
         between_data = f.read(last_block_size - check_block_size)
+        if len(between_data) != last_block_size - check_block_size:
+            raise IOError(f"Unexpected EOF while hashing {file_path}")
         sha1.update(between_data)
         md5.update(between_data)
         check_sha = sha1.get_state()
         
         check_data_bytes = f.read(check_block_size)
+        if len(check_data_bytes) != check_block_size:
+            raise IOError(f"Unexpected EOF while hashing {file_path}")
         sha1.update(check_data_bytes)
         md5.update(check_data_bytes)
         file_sha = sha1.hexdigest()

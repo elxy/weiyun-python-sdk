@@ -17,6 +17,7 @@ class WeiyunClient:
         self.token = token
         self.env_id = env_id
         self._request_id = 0
+        self._session = requests.Session()
 
     def _get_headers(self) -> Dict[str, str]:
         headers = {
@@ -45,7 +46,7 @@ class WeiyunClient:
             # This tool doesn't strictly need a token, but sending it doesn't hurt.
             pass
             
-        resp = requests.post(self.mcp_url, headers=headers, json=payload, timeout=120)
+        resp = self._session.post(self.mcp_url, headers=headers, json=payload, timeout=120)
         resp.raise_for_status()
         result = resp.json()
         
@@ -157,76 +158,75 @@ class WeiyunClient:
         if pdir_key:
             pre_upload_args["pdir_key"] = pdir_key
 
-        with open(file_path, "rb") as f:
-            file_data = f.read()
-
         # Phase 2 & 3: Upload loop
         round_num = 0
-        while round_num < max_rounds:
-            round_num += 1
-            pre_rsp = self._mcp_call("weiyun.upload", pre_upload_args)
-            
-            if pre_rsp.get("error"):
-                raise RuntimeError(f"Upload error (pre-upload): {pre_rsp['error']}")
-                
-            # Fast upload (file_exist == true)
-            if pre_rsp.get("file_exist", False):
-                return {
-                    "file_id": pre_rsp.get("file_id", ""),
-                    "filename": pre_rsp.get("filename", filename)
-                }
-                
-            ch_list = pre_rsp.get("channel_list", [])
-            uk = pre_rsp.get("upload_key", "")
-            ex = pre_rsp.get("ex", "")
-            
-            ch = None
-            for c in ch_list:
-                if int(c.get("len", 0)) > 0:
-                    ch = c
-                    break
-                    
-            if ch is None:
-                state = int(pre_rsp.get("upload_state", 0))
-                if state == 2:
+        with open(file_path, "rb") as f:
+            while round_num < max_rounds:
+                round_num += 1
+                pre_rsp = self._mcp_call("weiyun.upload", pre_upload_args)
+
+                if pre_rsp.get("error"):
+                    raise RuntimeError(f"Upload error (pre-upload): {pre_rsp['error']}")
+
+                # Fast upload (file_exist == true)
+                if pre_rsp.get("file_exist", False):
                     return {
                         "file_id": pre_rsp.get("file_id", ""),
                         "filename": pre_rsp.get("filename", filename)
                     }
-                raise RuntimeError(f"No available channel, upload_state={state}")
-                
-            offset = int(ch["offset"])
-            length = int(ch["len"])
-            channel_id = int(ch["id"])
-            actual_len = min(length, len(file_data) - offset)
-            
-            chunk = file_data[offset:offset + actual_len]
-            chunk_b64 = base64.b64encode(chunk).decode("utf-8")
-            
-            cl = [{"id": int(c["id"]), "offset": int(c["offset"]), "len": int(c["len"])} 
-                  for c in ch_list]
-                  
-            up_rsp = self._mcp_call("weiyun.upload", {
-                "filename": filename,
-                "file_size": file_size,
-                "file_sha": params["file_sha"],
-                "block_sha_list": [],
-                "check_sha": params["check_sha"],
-                "upload_key": uk,
-                "channel_list": cl,
-                "channel_id": channel_id,
-                "ex": ex,
-                "file_data": chunk_b64,
-            })
-            
-            if up_rsp.get("error"):
-                raise RuntimeError(f"Upload error (chunk): {up_rsp['error']}")
-                
-            state = int(up_rsp.get("upload_state", 0))
-            if state == 2:
-                return {
-                    "file_id": up_rsp.get("file_id") or pre_rsp.get("file_id", ""),
-                    "filename": up_rsp.get("filename") or pre_rsp.get("filename", filename)
-                }
+
+                ch_list = pre_rsp.get("channel_list", [])
+                uk = pre_rsp.get("upload_key", "")
+                ex = pre_rsp.get("ex", "")
+
+                ch = None
+                for c in ch_list:
+                    if int(c.get("len", 0)) > 0:
+                        ch = c
+                        break
+
+                if ch is None:
+                    state = int(pre_rsp.get("upload_state", 0))
+                    if state == 2:
+                        return {
+                            "file_id": pre_rsp.get("file_id", ""),
+                            "filename": pre_rsp.get("filename", filename)
+                        }
+                    raise RuntimeError(f"No available channel, upload_state={state}")
+
+                offset = int(ch["offset"])
+                length = int(ch["len"])
+                channel_id = int(ch["id"])
+
+                f.seek(offset)
+                chunk = f.read(length)
+                if not chunk:
+                    raise IOError(f"Unexpected EOF while reading upload chunk for {file_path}")
+
+                cl = [{"id": int(c["id"]), "offset": int(c["offset"]), "len": int(c["len"])}
+                      for c in ch_list]
+
+                up_rsp = self._mcp_call("weiyun.upload", {
+                    "filename": filename,
+                    "file_size": file_size,
+                    "file_sha": params["file_sha"],
+                    "block_sha_list": [],
+                    "check_sha": params["check_sha"],
+                    "upload_key": uk,
+                    "channel_list": cl,
+                    "channel_id": channel_id,
+                    "ex": ex,
+                    "file_data": base64.b64encode(chunk).decode("utf-8"),
+                })
+
+                if up_rsp.get("error"):
+                    raise RuntimeError(f"Upload error (chunk): {up_rsp['error']}")
+
+                state = int(up_rsp.get("upload_state", 0))
+                if state == 2:
+                    return {
+                        "file_id": up_rsp.get("file_id") or pre_rsp.get("file_id", ""),
+                        "filename": up_rsp.get("filename") or pre_rsp.get("filename", filename)
+                    }
                 
         raise RuntimeError(f"Exceeded maximum upload rounds ({max_rounds})")

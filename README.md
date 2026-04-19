@@ -156,3 +156,28 @@ print("删除结果:", res)
   - `upload.py`：上传参数计算。
   - `__main__.py`：支持 `python -m weiyun_sdk` 调用。
 - `pyproject.toml`：项目配置与依赖声明。
+
+## 性能基准
+
+仓库内提供了一个本地基准脚本，用来量化上传热点路径的 CPU 和内存开销：
+
+```bash
+.venv/bin/python3 scripts/benchmark_upload.py --size-mib 128 --runs 3 --warmups 1
+```
+
+也可以直接对真实文件做测试：
+
+```bash
+.venv/bin/python3 scripts/benchmark_upload.py /path/to/file --runs 5
+```
+
+脚本会分别对比四个路径：
+
+- `hash_legacy`：优化前的 `calc_upload_params`
+- `hash_current`：当前版本的 `calc_upload_params`
+- `chunk_legacy`：优化前整文件读入后再切片 Base64
+- `chunk_current`：当前按需读取 chunk 再 Base64
+
+输出会包含平均 wall time、平均 CPU time、峰值 RSS，以及相对提速比。
+
+当前实现会优先尝试通过系统 `libcrypto` 调用 OpenSSL 的 SHA1；如果环境不可用，再回退到纯 Python 实现。
