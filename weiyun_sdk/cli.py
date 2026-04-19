@@ -3,9 +3,69 @@ import argparse
 import json
 import os
 import sys
+import time
 from datetime import datetime
 
 from weiyun_sdk.client import WeiyunClient
+from weiyun_sdk.upload import get_sha1_backend_name
+
+
+def _format_bytes(num_bytes: float) -> str:
+    units = ["B", "KiB", "MiB", "GiB", "TiB"]
+    value = float(num_bytes)
+    for unit in units:
+        if value < 1024 or unit == units[-1]:
+            if unit == "B":
+                return f"{int(value)} {unit}"
+            return f"{value:.1f} {unit}"
+        value /= 1024
+    return f"{value:.1f} TiB"
+
+
+def _format_duration(seconds: float) -> str:
+    if seconds < 1:
+        return f"{seconds:.2f}s"
+    if seconds < 60:
+        return f"{seconds:.1f}s"
+    minutes, remain = divmod(seconds, 60)
+    return f"{int(minutes)}m{remain:04.1f}s"
+
+
+def _print_upload_progress(event):
+    name = event["event"]
+    filename = event["filename"]
+    file_size = event["file_size"]
+    uploaded_bytes = min(event.get("uploaded_bytes", 0), file_size)
+
+    if name == "hashing":
+        backend = event.get("sha1_backend", "unknown")
+        print(f"Hashing {filename} with {backend}...", file=sys.stderr)
+        return
+
+    if name == "hashed":
+        print("Hash complete, starting upload...", file=sys.stderr)
+        return
+
+    if name == "uploading":
+        offset = event.get("offset", 0)
+        chunk_size = event.get("chunk_size", 0)
+        progress = (offset / file_size * 100) if file_size else 100.0
+        print(
+            f"Uploading: {progress:6.2f}%  offset={_format_bytes(offset)}  chunk={_format_bytes(chunk_size)}",
+            file=sys.stderr,
+        )
+        return
+
+    if name == "uploaded":
+        progress = (uploaded_bytes / file_size * 100) if file_size else 100.0
+        print(
+            f"Uploaded:  {progress:6.2f}%  sent={_format_bytes(uploaded_bytes)}/{_format_bytes(file_size)}",
+            file=sys.stderr,
+        )
+        return
+
+    if name == "completed" and event.get("fast_upload"):
+        print("Fast upload hit, no chunk transfer needed.", file=sys.stderr)
 
 
 def format_size(n: int) -> str:
@@ -260,7 +320,8 @@ Examples:
     up_group.add_argument("--pdir_key", default=None, help="Parent directory key to upload to")
     up_group.add_argument("--path", default=None,
                           help="Semantic folder path (e.g. /Documents/ProjectA) to upload to")
-    up_parser.add_argument("--max_rounds", type=int, default=50, help="Max upload rounds")
+    up_parser.add_argument("--max_rounds", type=int, default=None,
+                           help="Max upload rounds; defaults to an automatic value based on file size")
 
     # Gen share link
     share_parser = subparsers.add_parser("share", help="Generate share link")
@@ -334,12 +395,29 @@ Examples:
 
         elif args.command == "upload":
             print(f"Uploading {args.file_path}...")
+            print(f"SHA1 backend: {get_sha1_backend_name()}", file=sys.stderr)
             target_pdir_key = args.pdir_key
             if getattr(args, 'path', None):
                 print(f"Resolving path '{args.path}'...")
                 target_pdir_key = resolve_path_to_dir_key(client, args.path)
-            res = client.upload(args.file_path, pdir_key=target_pdir_key, max_rounds=args.max_rounds)
+            cli_upload_started_at = time.perf_counter()
+            res = client.upload(
+                args.file_path,
+                pdir_key=target_pdir_key,
+                max_rounds=args.max_rounds,
+                progress_callback=_print_upload_progress,
+            )
+            elapsed_seconds = res.get("elapsed_seconds", time.perf_counter() - cli_upload_started_at)
+            average_speed_bytes = res.get("average_speed_bytes", 0.0)
             print("Upload successful!")
+            print(
+                f"Transferred {_format_bytes(res.get('uploaded_bytes', 0))} in {_format_duration(elapsed_seconds)}, "
+                f"average {_format_bytes(average_speed_bytes)}/s"
+            )
+            print(
+                f"Rounds used: {res.get('rounds_used')}/{res.get('max_rounds')}",
+                file=sys.stderr,
+            )
             print(json.dumps(res, indent=2, ensure_ascii=False))
 
         elif args.command == "share":

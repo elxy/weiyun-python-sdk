@@ -1,10 +1,14 @@
 import base64
 import json
 import os
+import time
 import requests
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, Callable, List, Optional
 
-from .upload import calc_upload_params
+from .upload import calc_upload_params, get_sha1_backend_name
+
+
+ProgressCallback = Callable[[Dict[str, Any]], None]
 
 
 class WeiyunClient:
@@ -132,19 +136,57 @@ class WeiyunClient:
         """
         return self._mcp_call("check_skill_update", {"version": version})
 
-    def upload(self, file_path: str, pdir_key: Optional[str] = None, max_rounds: int = 50) -> Dict[str, str]:
+    def upload(self, file_path: str, pdir_key: Optional[str] = None, max_rounds: Optional[int] = None,
+               progress_callback: Optional[ProgressCallback] = None) -> Dict[str, Any]:
         """
         weiyun.upload - Two-phase upload (Pre-upload + Chunk-upload).
-        Returns a dict with {"file_id": "...", "filename": "..."}
+        Returns a dict with upload result and timing statistics.
         """
         if not os.path.isfile(file_path):
             raise FileNotFoundError(f"File not found: {file_path}")
 
         file_size = os.path.getsize(file_path)
         filename = os.path.basename(file_path)
+        upload_started_at = time.perf_counter()
+        uploaded_bytes = 0
+        estimated_rounds = max(1, (file_size + 524287) // 524288)
+        effective_max_rounds = max_rounds or max(50, estimated_rounds * 3)
+
+        def report_progress(event: str, **extra: Any) -> None:
+            if not progress_callback:
+                return
+            payload: Dict[str, Any] = {
+                "event": event,
+                "filename": filename,
+                "file_size": file_size,
+                "uploaded_bytes": uploaded_bytes,
+                "elapsed_seconds": time.perf_counter() - upload_started_at,
+                "sha1_backend": get_sha1_backend_name(),
+                "max_rounds": effective_max_rounds,
+            }
+            payload.update(extra)
+            progress_callback(payload)
+
+        def make_result(file_id: str, resolved_filename: str, *, fast_upload: bool = False) -> Dict[str, Any]:
+            elapsed_seconds = time.perf_counter() - upload_started_at
+            average_speed = file_size / elapsed_seconds if elapsed_seconds > 0 else 0.0
+            return {
+                "file_id": file_id,
+                "filename": resolved_filename,
+                "file_size": file_size,
+                "uploaded_bytes": uploaded_bytes,
+                "elapsed_seconds": elapsed_seconds,
+                "average_speed_bytes": average_speed,
+                "fast_upload": fast_upload,
+                "sha1_backend": get_sha1_backend_name(),
+                "max_rounds": effective_max_rounds,
+                "rounds_used": round_num,
+            }
 
         # Phase 1: Calculate parameters
+        report_progress("hashing")
         params = calc_upload_params(file_path)
+        report_progress("hashed")
         
         pre_upload_args = {
             "filename": params["filename"],
@@ -161,7 +203,7 @@ class WeiyunClient:
         # Phase 2 & 3: Upload loop
         round_num = 0
         with open(file_path, "rb") as f:
-            while round_num < max_rounds:
+            while round_num < effective_max_rounds:
                 round_num += 1
                 pre_rsp = self._mcp_call("weiyun.upload", pre_upload_args)
 
@@ -170,10 +212,13 @@ class WeiyunClient:
 
                 # Fast upload (file_exist == true)
                 if pre_rsp.get("file_exist", False):
-                    return {
-                        "file_id": pre_rsp.get("file_id", ""),
-                        "filename": pre_rsp.get("filename", filename)
-                    }
+                    uploaded_bytes = file_size
+                    report_progress("completed", fast_upload=True, uploaded_bytes=file_size)
+                    return make_result(
+                        pre_rsp.get("file_id", ""),
+                        pre_rsp.get("filename", filename),
+                        fast_upload=True,
+                    )
 
                 ch_list = pre_rsp.get("channel_list", [])
                 uk = pre_rsp.get("upload_key", "")
@@ -188,20 +233,30 @@ class WeiyunClient:
                 if ch is None:
                     state = int(pre_rsp.get("upload_state", 0))
                     if state == 2:
-                        return {
-                            "file_id": pre_rsp.get("file_id", ""),
-                            "filename": pre_rsp.get("filename", filename)
-                        }
+                        uploaded_bytes = file_size
+                        report_progress("completed", fast_upload=False)
+                        return make_result(
+                            pre_rsp.get("file_id", ""),
+                            pre_rsp.get("filename", filename),
+                        )
                     raise RuntimeError(f"No available channel, upload_state={state}")
 
                 offset = int(ch["offset"])
                 length = int(ch["len"])
                 channel_id = int(ch["id"])
+                report_progress(
+                    "uploading",
+                    round_num=round_num,
+                    offset=offset,
+                    chunk_size=length,
+                    channel_id=channel_id,
+                )
 
                 f.seek(offset)
                 chunk = f.read(length)
                 if not chunk:
                     raise IOError(f"Unexpected EOF while reading upload chunk for {file_path}")
+                actual_len = len(chunk)
 
                 cl = [{"id": int(c["id"]), "offset": int(c["offset"]), "len": int(c["len"])}
                       for c in ch_list]
@@ -218,15 +273,24 @@ class WeiyunClient:
                     "ex": ex,
                     "file_data": base64.b64encode(chunk).decode("utf-8"),
                 })
+                uploaded_bytes = min(file_size, max(uploaded_bytes, offset + actual_len))
+                report_progress(
+                    "uploaded",
+                    round_num=round_num,
+                    offset=offset,
+                    chunk_size=actual_len,
+                    channel_id=channel_id,
+                )
 
                 if up_rsp.get("error"):
                     raise RuntimeError(f"Upload error (chunk): {up_rsp['error']}")
 
                 state = int(up_rsp.get("upload_state", 0))
                 if state == 2:
-                    return {
-                        "file_id": up_rsp.get("file_id") or pre_rsp.get("file_id", ""),
-                        "filename": up_rsp.get("filename") or pre_rsp.get("filename", filename)
-                    }
+                    report_progress("completed", fast_upload=False)
+                    return make_result(
+                        up_rsp.get("file_id") or pre_rsp.get("file_id", ""),
+                        up_rsp.get("filename") or pre_rsp.get("filename", filename),
+                    )
                 
-        raise RuntimeError(f"Exceeded maximum upload rounds ({max_rounds})")
+        raise RuntimeError(f"Exceeded maximum upload rounds ({effective_max_rounds})")

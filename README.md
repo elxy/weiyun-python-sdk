@@ -80,7 +80,8 @@ python -m weiyun_sdk [全局参数] <子命令> [子命令参数]
   weiyun --token YOUR_TOKEN upload /path/to/file --path /Documents/ProjectA
   ```
   - `--pdir_key` 和 `--path` 二选一，不可同时使用
-  - `--max_rounds`：最大上传轮次（默认 50）
+  - `--max_rounds`：最大上传轮次；默认按文件大小自动计算
+  - CLI 会在 stderr 输出当前使用的 SHA1 后端、哈希和分片上传进度，完成后打印总耗时与平均上传速度
 
 * **删除文件/目录：**
   ```bash

@@ -122,6 +122,12 @@ def create_sha1():
     return SHA1()
 
 
+def get_sha1_backend_name() -> str:
+    if openssl_sha1_available():
+        return "OpenSSL libcrypto"
+    return "Pure Python"
+
+
 def calc_upload_params(file_path):
     """
     Calculate Weiyun upload parameters:
