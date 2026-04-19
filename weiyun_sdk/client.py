@@ -11,6 +11,7 @@ from .upload import BLOCK_SIZE, calc_upload_params, get_sha1_backend_name
 
 
 ProgressCallback = Callable[[Dict[str, Any]], None]
+RETRYABLE_ERROR_MARKERS = ("retcode=190306", "服务器繁忙")
 
 
 class WeiyunClient:
@@ -122,6 +123,9 @@ class WeiyunClient:
             raise IOError(f"Unexpected EOF while reading upload chunk for {file_path}")
         return chunk
 
+    def _is_retryable_upload_error(self, error_message: str) -> bool:
+        return any(marker in error_message for marker in RETRYABLE_ERROR_MARKERS)
+
     def list(self, get_type: int = 0, offset: int = 0, limit: int = 50, 
              order_by: int = 0, asc: bool = False, 
              dir_key: Optional[str] = None, pdir_key: Optional[str] = None) -> Dict[str, Any]:
@@ -216,6 +220,7 @@ class WeiyunClient:
         transfer_elapsed_seconds = 0.0
         retry_count = 0
         last_uploaded_end = 0
+        server_busy_retry_count = 0
 
         def report_progress(event: str, **extra: Any) -> None:
             if not progress_callback:
@@ -229,6 +234,7 @@ class WeiyunClient:
                 "sha1_backend": get_sha1_backend_name(),
                 "max_rounds": effective_max_rounds,
                 "retry_count": retry_count,
+                "server_busy_retry_count": server_busy_retry_count,
                 "max_workers": worker_count,
             }
             payload.update(extra)
@@ -254,6 +260,7 @@ class WeiyunClient:
                 "max_rounds": effective_max_rounds,
                 "rounds_used": round_num,
                 "retry_count": retry_count,
+                "server_busy_retry_count": server_busy_retry_count,
                 "max_workers": worker_count,
             }
 
@@ -261,7 +268,7 @@ class WeiyunClient:
         report_progress("hashing")
         params = calc_upload_params(file_path)
         hash_elapsed_seconds = time.perf_counter() - hash_started_at
-        report_progress("hashed")
+        report_progress("hashed", hash_elapsed_seconds=hash_elapsed_seconds)
         
         pre_upload_args = {
             "filename": params["filename"],
@@ -284,7 +291,19 @@ class WeiyunClient:
             pre_rsp = self._mcp_call("weiyun.upload", pre_upload_args)
 
             if pre_rsp.get("error"):
-                raise RuntimeError(f"Upload error (pre-upload): {pre_rsp['error']}")
+                error_message = str(pre_rsp["error"])
+                if self._is_retryable_upload_error(error_message):
+                    server_busy_retry_count += 1
+                    backoff_seconds = min(30.0, 1.5 * (2 ** min(server_busy_retry_count - 1, 4)))
+                    report_progress(
+                        "backoff",
+                        round_num=round_num,
+                        backoff_seconds=backoff_seconds,
+                        reason=error_message,
+                    )
+                    time.sleep(backoff_seconds)
+                    continue
+                raise RuntimeError(f"Upload error (pre-upload): {error_message}")
 
             if pre_rsp.get("file_exist", False):
                 uploaded_bytes = file_size

@@ -11,7 +11,26 @@ from weiyun_sdk.client import WeiyunClient
 from weiyun_sdk.upload import get_sha1_backend_name
 
 
-_UPLOAD_PROGRESS_STATE: Dict[str, Any] = {"active": False}
+_UPLOAD_PROGRESS_STATE: Dict[str, Any] = {"active": False, "last_line_len": 0}
+
+
+def _clear_upload_progress_line() -> None:
+    if not _UPLOAD_PROGRESS_STATE.get("active"):
+        return
+    last_line_len = int(_UPLOAD_PROGRESS_STATE.get("last_line_len", 0))
+    print("\r" + (" " * last_line_len) + "\r", end="", file=sys.stderr, flush=True)
+    _UPLOAD_PROGRESS_STATE["active"] = False
+    _UPLOAD_PROGRESS_STATE["last_line_len"] = 0
+
+
+def _write_upload_progress_line(message: str) -> None:
+    padded = message
+    last_line_len = int(_UPLOAD_PROGRESS_STATE.get("last_line_len", 0))
+    if len(message) < last_line_len:
+        padded += " " * (last_line_len - len(message))
+    print("\r" + padded, end="", file=sys.stderr, flush=True)
+    _UPLOAD_PROGRESS_STATE["active"] = True
+    _UPLOAD_PROGRESS_STATE["last_line_len"] = len(message)
 
 
 def _render_upload_status(prefix: str, file_size: int, uploaded_bytes: int,
@@ -61,19 +80,23 @@ def _print_upload_progress(event):
     uploaded_bytes = min(event.get("uploaded_bytes", 0), file_size)
 
     if name == "hashing":
-        _UPLOAD_PROGRESS_STATE["active"] = True
+        _clear_upload_progress_line()
         backend = event.get("sha1_backend", "unknown")
-        print(f"\rHashing {filename} with {backend}...", end="", file=sys.stderr, flush=True)
+        print(f"Hashing {filename} with {backend}...", file=sys.stderr, flush=True)
         return
 
     if name == "hashed":
-        print("\rHash complete, starting upload...", end="", file=sys.stderr, flush=True)
+        _clear_upload_progress_line()
+        print(
+            f"Hash complete in {_format_duration(event.get('hash_elapsed_seconds', 0.0))}, starting upload...",
+            file=sys.stderr,
+            flush=True,
+        )
         return
 
     if name == "waiting":
-        print(
-            "\r"
-            + _render_upload_status(
+        _write_upload_progress_line(
+            _render_upload_status(
                 "Waiting",
                 file_size,
                 uploaded_bytes,
@@ -81,18 +104,29 @@ def _print_upload_progress(event):
                 retry_count=event.get("retry_count", 0),
                 worker_count=event.get("max_workers", 1),
                 waiting=True,
-            ),
-            end="",
-            file=sys.stderr,
-            flush=True,
+            )
+        )
+        return
+
+    if name == "backoff":
+        _write_upload_progress_line(
+            _render_upload_status(
+                "Backoff",
+                file_size,
+                uploaded_bytes,
+                event.get("elapsed_seconds", 0.0),
+                retry_count=event.get("retry_count", 0),
+                worker_count=event.get("max_workers", 1),
+                waiting=True,
+            )
+            + f"  sleep={event.get('backoff_seconds', 0.0):.1f}s"
         )
         return
 
     if name == "uploading":
         chunk_size = event.get("chunk_size", 0)
-        print(
-            "\r"
-            + _render_upload_status(
+        _write_upload_progress_line(
+            _render_upload_status(
                 "Uploading",
                 file_size,
                 uploaded_bytes,
@@ -100,17 +134,13 @@ def _print_upload_progress(event):
                 chunk_size=chunk_size,
                 retry_count=event.get("retry_count", 0),
                 worker_count=event.get("max_workers", 1),
-            ),
-            end="",
-            file=sys.stderr,
-            flush=True,
+            )
         )
         return
 
     if name == "uploaded":
-        print(
-            "\r"
-            + _render_upload_status(
+        _write_upload_progress_line(
+            _render_upload_status(
                 "Uploaded",
                 file_size,
                 uploaded_bytes,
@@ -118,25 +148,24 @@ def _print_upload_progress(event):
                 chunk_size=event.get("chunk_size", 0),
                 retry_count=event.get("retry_count", 0),
                 worker_count=event.get("max_workers", 1),
-            ),
-            end="",
-            file=sys.stderr,
-            flush=True,
+            )
         )
         return
 
     if name == "completed" and event.get("fast_upload"):
-        print("\rFast upload hit, no chunk transfer needed.", file=sys.stderr, flush=True)
-        _UPLOAD_PROGRESS_STATE["active"] = False
+        _clear_upload_progress_line()
+        print("Fast upload hit, no chunk transfer needed.", file=sys.stderr, flush=True)
+        return
 
     if name == "completed":
-        _UPLOAD_PROGRESS_STATE["active"] = False
+        _clear_upload_progress_line()
 
 
 def _finish_upload_progress() -> None:
     if _UPLOAD_PROGRESS_STATE.get("active"):
         print(file=sys.stderr, flush=True)
         _UPLOAD_PROGRESS_STATE["active"] = False
+        _UPLOAD_PROGRESS_STATE["last_line_len"] = 0
 
 
 def format_size(n: int) -> str:
@@ -490,7 +519,8 @@ Examples:
             )
             print(
                 f"Transfer time: {_format_duration(res.get('transfer_elapsed_seconds', 0.0))}, "
-                f"speed {_format_bytes(average_speed_bytes)}/s, retries {res.get('retry_count', 0)}"
+                f"speed {_format_bytes(average_speed_bytes)}/s, retries {res.get('retry_count', 0)}, "
+                f"server-busy retries {res.get('server_busy_retry_count', 0)}"
             )
             print(f"Total time: {_format_duration(elapsed_seconds)}")
             print(
