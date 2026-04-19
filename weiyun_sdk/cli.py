@@ -522,6 +522,12 @@ Examples:
                 f"speed {_format_bytes(average_speed_bytes)}/s, retries {res.get('retry_count', 0)}, "
                 f"server-busy retries {res.get('server_busy_retry_count', 0)}"
             )
+            print(
+                f"Observed calls: pre-upload {res.get('pre_upload_calls', 0)} in "
+                f"{_format_duration(res.get('pre_upload_elapsed_seconds', 0.0))}, "
+                f"chunk-upload {res.get('chunk_upload_calls', 0)} in "
+                f"{_format_duration(res.get('chunk_upload_elapsed_seconds', 0.0))}"
+            )
             print(f"Total time: {_format_duration(elapsed_seconds)}")
             print(
                 f"Rounds used: {res.get('rounds_used')}/{res.get('max_rounds')}",

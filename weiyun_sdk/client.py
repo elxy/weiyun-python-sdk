@@ -221,6 +221,10 @@ class WeiyunClient:
         retry_count = 0
         last_uploaded_end = 0
         server_busy_retry_count = 0
+        pre_upload_elapsed_seconds = 0.0
+        chunk_upload_elapsed_seconds = 0.0
+        pre_upload_calls = 0
+        chunk_upload_calls = 0
 
         def report_progress(event: str, **extra: Any) -> None:
             if not progress_callback:
@@ -236,6 +240,10 @@ class WeiyunClient:
                 "retry_count": retry_count,
                 "server_busy_retry_count": server_busy_retry_count,
                 "max_workers": worker_count,
+                "pre_upload_elapsed_seconds": pre_upload_elapsed_seconds,
+                "chunk_upload_elapsed_seconds": chunk_upload_elapsed_seconds,
+                "pre_upload_calls": pre_upload_calls,
+                "chunk_upload_calls": chunk_upload_calls,
             }
             payload.update(extra)
             progress_callback(payload)
@@ -262,6 +270,10 @@ class WeiyunClient:
                 "retry_count": retry_count,
                 "server_busy_retry_count": server_busy_retry_count,
                 "max_workers": worker_count,
+                "pre_upload_elapsed_seconds": pre_upload_elapsed_seconds,
+                "chunk_upload_elapsed_seconds": chunk_upload_elapsed_seconds,
+                "pre_upload_calls": pre_upload_calls,
+                "chunk_upload_calls": chunk_upload_calls,
             }
 
         # Phase 1: Calculate parameters
@@ -288,7 +300,10 @@ class WeiyunClient:
             round_num += 1
             if transfer_started_at is None:
                 transfer_started_at = time.perf_counter()
+            pre_upload_call_started_at = time.perf_counter()
             pre_rsp = self._mcp_call("weiyun.upload", pre_upload_args)
+            pre_upload_elapsed_seconds += time.perf_counter() - pre_upload_call_started_at
+            pre_upload_calls += 1
 
             if pre_rsp.get("error"):
                 error_message = str(pre_rsp["error"])
@@ -352,6 +367,7 @@ class WeiyunClient:
             cl = [{"id": int(c["id"]), "offset": int(c["offset"]), "len": int(c["len"])}
                   for c in ch_list]
             upload_results: List[Tuple[Dict[str, int], Dict[str, Any], int]] = []
+            chunk_batch_started_at = time.perf_counter()
             with concurrent.futures.ThreadPoolExecutor(max_workers=len(selected_channels)) as executor:
                 future_map = {}
                 for channel in selected_channels:
@@ -373,7 +389,11 @@ class WeiyunClient:
                 for future in concurrent.futures.as_completed(future_map):
                     channel, actual_len = future_map[future]
                     up_rsp = future.result()
+                    chunk_upload_calls += 1
                     upload_results.append((channel, up_rsp, actual_len))
+
+            if selected_channels:
+                chunk_upload_elapsed_seconds += time.perf_counter() - chunk_batch_started_at
 
             completion_state = None
             completion_rsp = None
