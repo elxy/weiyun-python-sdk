@@ -51,6 +51,17 @@ def _print_upload_progress(event):
         print("\rHash complete, starting upload...", end="", file=sys.stderr, flush=True)
         return
 
+    if name == "waiting":
+        retries = event.get("retry_count", 0)
+        print(
+            "\r"
+            f"Waiting for server to advance other channels... retries={retries}",
+            end="",
+            file=sys.stderr,
+            flush=True,
+        )
+        return
+
     if name == "uploading":
         offset = event.get("offset", 0)
         chunk_size = event.get("chunk_size", 0)
@@ -349,6 +360,8 @@ Examples:
                           help="Semantic folder path (e.g. /Documents/ProjectA) to upload to")
     up_parser.add_argument("--max_rounds", type=int, default=None,
                            help="Max upload rounds; defaults to an automatic value based on file size")
+    up_parser.add_argument("--workers", type=int, default=1,
+                           help="Parallel upload workers to use per round (default 1)")
 
     # Gen share link
     share_parser = subparsers.add_parser("share", help="Generate share link")
@@ -432,6 +445,7 @@ Examples:
                 args.file_path,
                 pdir_key=target_pdir_key,
                 max_rounds=args.max_rounds,
+                max_workers=args.workers,
                 progress_callback=_print_upload_progress,
             )
             _finish_upload_progress()
@@ -450,6 +464,7 @@ Examples:
                 f"Rounds used: {res.get('rounds_used')}/{res.get('max_rounds')}",
                 file=sys.stderr,
             )
+            print(f"Workers used: {res.get('max_workers')}", file=sys.stderr)
             print(json.dumps(res, indent=2, ensure_ascii=False))
 
         elif args.command == "share":

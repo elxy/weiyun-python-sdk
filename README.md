@@ -78,9 +78,13 @@ python -m weiyun_sdk [全局参数] <子命令> [子命令参数]
 
   # 或通过语义路径指定目标目录
   weiyun --token YOUR_TOKEN upload /path/to/file --path /Documents/ProjectA
+
+  # 启用多通道并行上传
+  weiyun --token YOUR_TOKEN upload /path/to/file --pdir_key YOUR_PDIR_KEY --workers 4
   ```
   - `--pdir_key` 和 `--path` 二选一，不可同时使用
   - `--max_rounds`：最大上传轮次；默认按文件大小自动计算
+  - `--workers`：每轮最多并行上传的通道数；默认 1，可按服务端返回的通道数提升到最多 4
   - CLI 会在 stderr 输出当前使用的 SHA1 后端、哈希和分片上传进度
   - 上传完成后会打印 `hash` 耗时、`transfer` 耗时与平均速度/重试次数，以及总耗时
 
