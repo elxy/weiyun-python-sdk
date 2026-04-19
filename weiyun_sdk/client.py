@@ -5,7 +5,7 @@ import time
 import requests
 from typing import Dict, Any, Callable, List, Optional
 
-from .upload import calc_upload_params, get_sha1_backend_name
+from .upload import BLOCK_SIZE, calc_upload_params, get_sha1_backend_name
 
 
 ProgressCallback = Callable[[Dict[str, Any]], None]
@@ -151,6 +151,12 @@ class WeiyunClient:
         uploaded_bytes = 0
         estimated_rounds = max(1, (file_size + 524287) // 524288)
         effective_max_rounds = max_rounds or max(50, estimated_rounds * 3)
+        hash_started_at = upload_started_at
+        hash_elapsed_seconds = 0.0
+        transfer_started_at: Optional[float] = None
+        transfer_elapsed_seconds = 0.0
+        retry_count = 0
+        last_uploaded_end = 0
 
         def report_progress(event: str, **extra: Any) -> None:
             if not progress_callback:
@@ -163,29 +169,37 @@ class WeiyunClient:
                 "elapsed_seconds": time.perf_counter() - upload_started_at,
                 "sha1_backend": get_sha1_backend_name(),
                 "max_rounds": effective_max_rounds,
+                "retry_count": retry_count,
             }
             payload.update(extra)
             progress_callback(payload)
 
         def make_result(file_id: str, resolved_filename: str, *, fast_upload: bool = False) -> Dict[str, Any]:
-            elapsed_seconds = time.perf_counter() - upload_started_at
-            average_speed = file_size / elapsed_seconds if elapsed_seconds > 0 else 0.0
+            total_elapsed_seconds = time.perf_counter() - upload_started_at
+            effective_transfer_elapsed = transfer_elapsed_seconds
+            if transfer_started_at is not None and effective_transfer_elapsed == 0.0:
+                effective_transfer_elapsed = time.perf_counter() - transfer_started_at
+            average_speed = uploaded_bytes / effective_transfer_elapsed if effective_transfer_elapsed > 0 else 0.0
             return {
                 "file_id": file_id,
                 "filename": resolved_filename,
                 "file_size": file_size,
                 "uploaded_bytes": uploaded_bytes,
-                "elapsed_seconds": elapsed_seconds,
+                "elapsed_seconds": total_elapsed_seconds,
+                "hash_elapsed_seconds": hash_elapsed_seconds,
+                "transfer_elapsed_seconds": effective_transfer_elapsed,
                 "average_speed_bytes": average_speed,
                 "fast_upload": fast_upload,
                 "sha1_backend": get_sha1_backend_name(),
                 "max_rounds": effective_max_rounds,
                 "rounds_used": round_num,
+                "retry_count": retry_count,
             }
 
         # Phase 1: Calculate parameters
         report_progress("hashing")
         params = calc_upload_params(file_path)
+        hash_elapsed_seconds = time.perf_counter() - hash_started_at
         report_progress("hashed")
         
         pre_upload_args = {
@@ -205,6 +219,8 @@ class WeiyunClient:
         with open(file_path, "rb") as f:
             while round_num < effective_max_rounds:
                 round_num += 1
+                if transfer_started_at is None:
+                    transfer_started_at = time.perf_counter()
                 pre_rsp = self._mcp_call("weiyun.upload", pre_upload_args)
 
                 if pre_rsp.get("error"):
@@ -213,6 +229,8 @@ class WeiyunClient:
                 # Fast upload (file_exist == true)
                 if pre_rsp.get("file_exist", False):
                     uploaded_bytes = file_size
+                    if transfer_started_at is not None:
+                        transfer_elapsed_seconds = time.perf_counter() - transfer_started_at
                     report_progress("completed", fast_upload=True, uploaded_bytes=file_size)
                     return make_result(
                         pre_rsp.get("file_id", ""),
@@ -234,6 +252,8 @@ class WeiyunClient:
                     state = int(pre_rsp.get("upload_state", 0))
                     if state == 2:
                         uploaded_bytes = file_size
+                        if transfer_started_at is not None:
+                            transfer_elapsed_seconds = time.perf_counter() - transfer_started_at
                         report_progress("completed", fast_upload=False)
                         return make_result(
                             pre_rsp.get("file_id", ""),
@@ -244,6 +264,8 @@ class WeiyunClient:
                 offset = int(ch["offset"])
                 length = int(ch["len"])
                 channel_id = int(ch["id"])
+                if offset < last_uploaded_end:
+                    retry_count += 1
                 report_progress(
                     "uploading",
                     round_num=round_num,
@@ -274,6 +296,9 @@ class WeiyunClient:
                     "file_data": base64.b64encode(chunk).decode("utf-8"),
                 })
                 uploaded_bytes = min(file_size, max(uploaded_bytes, offset + actual_len))
+                last_uploaded_end = max(last_uploaded_end, offset + actual_len)
+                if transfer_started_at is not None:
+                    transfer_elapsed_seconds = time.perf_counter() - transfer_started_at
                 report_progress(
                     "uploaded",
                     round_num=round_num,
@@ -287,10 +312,16 @@ class WeiyunClient:
 
                 state = int(up_rsp.get("upload_state", 0))
                 if state == 2:
+                    if transfer_started_at is not None:
+                        transfer_elapsed_seconds = time.perf_counter() - transfer_started_at
                     report_progress("completed", fast_upload=False)
                     return make_result(
                         up_rsp.get("file_id") or pre_rsp.get("file_id", ""),
                         up_rsp.get("filename") or pre_rsp.get("filename", filename),
                     )
                 
-        raise RuntimeError(f"Exceeded maximum upload rounds ({effective_max_rounds})")
+        estimated_required_rounds = max(1, (file_size + BLOCK_SIZE - 1) // BLOCK_SIZE)
+        raise RuntimeError(
+            f"Exceeded maximum upload rounds ({effective_max_rounds}); "
+            f"estimated minimum rounds for this file is about {estimated_required_rounds}"
+        )

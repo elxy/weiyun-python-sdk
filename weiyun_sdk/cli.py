@@ -85,6 +85,9 @@ def _print_upload_progress(event):
         print("\rFast upload hit, no chunk transfer needed.", file=sys.stderr, flush=True)
         _UPLOAD_PROGRESS_STATE["active"] = False
 
+    if name == "completed":
+        _UPLOAD_PROGRESS_STATE["active"] = False
+
 
 def _finish_upload_progress() -> None:
     if _UPLOAD_PROGRESS_STATE.get("active"):
@@ -436,9 +439,13 @@ Examples:
             average_speed_bytes = res.get("average_speed_bytes", 0.0)
             print("Upload successful!")
             print(
-                f"Transferred {_format_bytes(res.get('uploaded_bytes', 0))} in {_format_duration(elapsed_seconds)}, "
-                f"average {_format_bytes(average_speed_bytes)}/s"
+                f"Hash time: {_format_duration(res.get('hash_elapsed_seconds', 0.0))}"
             )
+            print(
+                f"Transfer time: {_format_duration(res.get('transfer_elapsed_seconds', 0.0))}, "
+                f"speed {_format_bytes(average_speed_bytes)}/s, retries {res.get('retry_count', 0)}"
+            )
+            print(f"Total time: {_format_duration(elapsed_seconds)}")
             print(
                 f"Rounds used: {res.get('rounds_used')}/{res.get('max_rounds')}",
                 file=sys.stderr,
